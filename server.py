@@ -27,7 +27,6 @@ async def submit_tips(payload: TipPayload):
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        # Großes Browserfenster setzen, damit alle Buttons im Viewport liegen
         context = await browser.new_context(
             viewport={"width": 1920, "height": 1080},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -47,7 +46,10 @@ async def submit_tips(payload: TipPayload):
 
             await page.fill('input[name="kennung"]', email)
             await page.fill('input[name="passwort"]', password)
-            await page.click('button[type="submit"], input[type="submit"], input[name="submitbutton"]', force=True)
+            
+            # Login-Button per JavaScript auslösen
+            login_btn = page.locator('button[type="submit"], input[type="submit"], input[name="submitbutton"]').first
+            await login_btn.evaluate("node => node.click()")
 
             await page.wait_for_load_state("networkidle")
 
@@ -72,12 +74,11 @@ async def submit_tips(payload: TipPayload):
                 if i < len(tip_inputs):
                     await tip_inputs[i].fill(str(val))
 
-            # 4. Speichern mit scroll_into_view_if_needed und force=True
+            # 4. Speichern per JavaScript-Klick (garantiert ohne Viewport-Fehler)
             submit_btn = page.locator('button[type="submit"], input[type="submit"], button:has-text("Speichern"), button:has-text("Tipps speichern")').first
-            await submit_btn.scroll_into_view_if_needed()
-            await submit_btn.click(force=True)
+            await submit_btn.evaluate("node => node.click()")
 
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(4000)
             await page.wait_for_load_state("networkidle")
 
             return {
