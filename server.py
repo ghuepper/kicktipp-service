@@ -27,16 +27,17 @@ async def submit_tips(payload: TipPayload):
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
+        # Großes Browserfenster setzen, damit alle Buttons im Viewport liegen
         context = await browser.new_context(
+            viewport={"width": 1920, "height": 1080},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
 
         try:
-            # 1. Login-Seite aufrufen
+            # 1. Login
             await page.goto(f"https://www.kicktipp.de/{tipprunde}/profil/login", wait_until="networkidle")
 
-            # Cookie-Banner wegklicken (falls vorhanden)
             try:
                 cookie_button = page.locator("button:has-text('Akzeptieren'), button:has-text('Zustimmen'), #cmpwelcomebtnyes")
                 if await cookie_button.first.is_visible(timeout=3000):
@@ -44,20 +45,18 @@ async def submit_tips(payload: TipPayload):
             except Exception:
                 pass
 
-            # Login-Felder ausfüllen
             await page.fill('input[name="kennung"]', email)
             await page.fill('input[name="passwort"]', password)
-            await page.click('button[type="submit"], input[type="submit"], input[name="submitbutton"]')
+            await page.click('button[type="submit"], input[type="submit"], input[name="submitbutton"]', force=True)
 
             await page.wait_for_load_state("networkidle")
 
-            # 2. Tippabgabe-Seite aufrufen
+            # 2. Tippabgabe aufrufen
             await page.goto(f"https://www.kicktipp.de/{tipprunde}/tippabgabe", wait_until="networkidle")
 
-            # 3. Tippfelder suchen und ausfüllen
+            # 3. Tippfelder ausfüllen
             inputs = await page.query_selector_all("input[type='text'], input[type='number'], input[name^='tipp_']")
             
-            # Filtert nur echte Tipp-Eingabefelder heraus
             tip_inputs = []
             for inp in inputs:
                 name = await inp.get_attribute("name") or ""
@@ -65,38 +64,18 @@ async def submit_tips(payload: TipPayload):
                 if "tipp" in name.lower() or "tipp" in inp_id.lower() or "heim" in name.lower() or "gast" in name.lower():
                     tip_inputs.append(inp)
 
-            # Falls der Namensfilter leer war, nimm alle sichtbaren Text-/Number-Inputs der Tipptabelle
             if not tip_inputs:
                 tip_inputs = [inp for inp in inputs if await inp.is_visible()]
 
-            # Werte eintragen
             flat_tips = [val for match in payload.tips for val in match]
             for i, val in enumerate(flat_tips):
                 if i < len(tip_inputs):
                     await tip_inputs[i].fill(str(val))
 
-            # 4. Speichern-Button flexibel ansteuern
-            submit_selectors = [
-                'input[name="submitbutton"]',
-                'button[type="submit"]',
-                'input[type="submit"]',
-                'button:has-text("Speichern")',
-                'input[value="Speichern"]',
-                'button:has-text("Tipps speichern")',
-                'input[value="Tipps speichern"]'
-            ]
-
-            clicked = False
-            for selector in submit_selectors:
-                btn = page.locator(selector)
-                if await btn.first.is_visible(timeout=1500):
-                    await btn.first.click()
-                    clicked = True
-                    break
-
-            if not clicked:
-                # Fallback: Erstes Submit-Element
-                await page.locator('input[type="submit"], button[type="submit"]').first.click()
+            # 4. Speichern mit scroll_into_view_if_needed und force=True
+            submit_btn = page.locator('button[type="submit"], input[type="submit"], button:has-text("Speichern"), button:has-text("Tipps speichern")').first
+            await submit_btn.scroll_into_view_if_needed()
+            await submit_btn.click(force=True)
 
             await page.wait_for_timeout(3000)
             await page.wait_for_load_state("networkidle")
