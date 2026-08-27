@@ -1,60 +1,113 @@
 import os
-import time
+import asyncio
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Tuple
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 
 app = FastAPI()
 
-EMAIL = os.environ.get("KT_USER")
-PASSWORD = os.environ.get("KT_PASS")
-COMMUNITY = os.environ.get("KT_COMMUNITY", "kicktipp-muenster")
-
 class TipPayload(BaseModel):
-    tips: List[Tuple[int, int]]
+    tips: list[list[int]]
+
+@app.get("/")
+async def health():
+    return {"status": "ok"}
 
 @app.post("/submit-tips")
-def submit_tips(payload: TipPayload):
-    if not EMAIL or not PASSWORD:
-        raise HTTPException(status_code=500, detail="Kicktipp-Zugangsdaten fehlen in den Umgebungsvariablen!")
+async def submit_tips(payload: TipPayload):
+    email = os.getenv("KT_USER") or os.getenv("KICKTIPP_EMAIL")
+    password = os.getenv("KT_PASS") or os.getenv("KICKTIPP_PASSWORD")
+    tipprunde = os.getenv("KT_COMMUNITY") or os.getenv("KICKTIPP_TIPPRUNDE") or "kicktipp-muenster"
 
-    if len(payload.tips) < 9:
-        raise HTTPException(status_code=400, detail="Es müssen genau 9 Spielergebnisse übermittelt werden.")
+    if not email or not password:
+        raise HTTPException(
+            status_code=500,
+            detail="Umgebungsvariablen KT_USER / KT_PASS fehlen."
+        )
 
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            page = context.new_page()
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
 
-            # 1. Login bei Kicktipp
-            page.goto("https://www.kicktipp.de/info/profil/login")
-            page.fill('#kennung', EMAIL)
-            page.fill('#passwort', PASSWORD)
-            page.click('button[type="submit"]')
-            page.wait_for_load_state("networkidle")
+        try:
+            # 1. Login-Seite aufrufen
+            await page.goto(f"https://www.kicktipp.de/{tipprunde}/profil/login", wait_until="networkidle")
 
-            # 2. Tippabgabe aufrufen
-            page.goto(f"https://www.kicktipp.de/{COMMUNITY}/tippabgabe")
-            page.wait_for_load_state("networkidle")
+            # Cookie-Banner wegklicken (falls vorhanden)
+            try:
+                cookie_button = page.locator("button:has-text('Akzeptieren'), button:has-text('Zustimmen'), #cmpwelcomebtnyes")
+                if await cookie_button.first.is_visible(timeout=3000):
+                    await cookie_button.first.click()
+            except Exception:
+                pass
 
-            inputs = page.query_selector_all('table.tippabgabe input[type="text"], table.tippabgabe input[type="number"]')
-            visible = [inp for inp in inputs if inp.is_visible()]
+            # Login-Felder ausfüllen
+            await page.fill('input[name="kennung"]', email)
+            await page.fill('input[name="passwort"]', password)
+            await page.click('button[type="submit"], input[type="submit"], input[name="submitbutton"]')
 
-            # 3. Felder befüllen
-            for i, (heim, gast) in enumerate(payload.tips):
-                idx = i * 2
-                if idx + 1 < len(visible):
-                    visible[idx].fill(str(heim))
-                    visible[idx + 1].fill(str(gast))
+            await page.wait_for_load_state("networkidle")
 
-            # 4. Abschicken
-            page.click('input[name="submitbutton"]')
-            time.sleep(2)
-            browser.close()
+            # 2. Tippabgabe-Seite aufrufen
+            await page.goto(f"https://www.kicktipp.de/{tipprunde}/tippabgabe", wait_until="networkidle")
 
-        return {"status": "success", "message": "Tipps wurden erfolgreich bei Kicktipp eingetragen!"}
+            # 3. Tippfelder suchen und ausfüllen
+            inputs = await page.query_selector_all("input[type='text'], input[type='number'], input[name^='tipp_']")
+            
+            # Filtert nur echte Tipp-Eingabefelder heraus
+            tip_inputs = []
+            for inp in inputs:
+                name = await inp.get_attribute("name") or ""
+                inp_id = await inp.get_attribute("id") or ""
+                if "tipp" in name.lower() or "tipp" in inp_id.lower() or "heim" in name.lower() or "gast" in name.lower():
+                    tip_inputs.append(inp)
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+            # Falls der Namensfilter leer war, nimm alle sichtbaren Text-/Number-Inputs der Tipptabelle
+            if not tip_inputs:
+                tip_inputs = [inp for inp in inputs if await inp.is_visible()]
+
+            # Werte eintragen
+            flat_tips = [val for match in payload.tips for val in match]
+            for i, val in enumerate(flat_tips):
+                if i < len(tip_inputs):
+                    await tip_inputs[i].fill(str(val))
+
+            # 4. Speichern-Button flexibel ansteuern
+            submit_selectors = [
+                'input[name="submitbutton"]',
+                'button[type="submit"]',
+                'input[type="submit"]',
+                'button:has-text("Speichern")',
+                'input[value="Speichern"]',
+                'button:has-text("Tipps speichern")',
+                'input[value="Tipps speichern"]'
+            ]
+
+            clicked = False
+            for selector in submit_selectors:
+                btn = page.locator(selector)
+                if await btn.first.is_visible(timeout=1500):
+                    await btn.first.click()
+                    clicked = True
+                    break
+
+            if not clicked:
+                # Fallback: Erstes Submit-Element
+                await page.locator('input[type="submit"], button[type="submit"]').first.click()
+
+            await page.wait_for_timeout(3000)
+            await page.wait_for_load_state("networkidle")
+
+            return {
+                "status": "success",
+                "message": f"{len(payload.tips)} Spiele erfolgreich getippt und gespeichert!"
+            }
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        finally:
+            await browser.close()
