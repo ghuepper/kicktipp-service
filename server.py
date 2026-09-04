@@ -81,13 +81,16 @@ async def submit_tips(payload: TipPayload):
             # 2. Tippabgabe aufrufen
             await page.goto(f"https://www.kicktipp.de/{tipprunde}/tippabgabe", wait_until="networkidle")
 
-            # 3. Zeilen auf der Kicktipp-Seite auslesen
+            # 3. Zeilen direkt über enthaltene Eingabefelder finden
             tr_elements = await page.locator("tr").all()
             
             rows_data = []
             for tr in tr_elements:
-                text = await tr.inner_text()
                 inputs = await tr.locator("input[type='text'], input[type='number']").all()
+                if not inputs:
+                    continue
+                
+                text = await tr.inner_text()
                 
                 is_locked = False
                 score_inputs = []
@@ -100,16 +103,16 @@ async def submit_tips(payload: TipPayload):
                         else:
                             score_inputs.append(inp)
 
-                if len(text.strip()) > 3 and ("-" in text or len(inputs) > 0):
+                if len(score_inputs) > 0 or is_locked:
                     rows_data.append({
                         "tr": tr,
                         "text": text,
                         "inputs": score_inputs,
-                        "is_locked": is_locked or (len(inputs) == 0 and "-" in text)
+                        "is_locked": is_locked or len(score_inputs) == 0
                     })
 
             if not rows_data:
-                raise HTTPException(status_code=500, detail="Keine Tipp-Zeilen auf der Kicktipp-Seite gefunden.")
+                raise HTTPException(status_code=500, detail="Keine Tipp-Zeilen mit Eingabefeldern auf der Kicktipp-Seite gefunden.")
 
             used_payload_indices = set()
             matched_count = 0
