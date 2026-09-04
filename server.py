@@ -156,30 +156,6 @@ def match_tip_to_row(tip: TipItem, rows, used_row_ids):
 @app.get("/")
 async def health():
     return {"status": "ok"}
-
-
-@app.get("/debug-env")
-async def debug_env():
-    """Maskierte Kontrolle der Zugangsdaten-Umgebungsvariablen —
-    verrät keine Geheimnisse, zeigt aber, ob die Werte ankommen
-    (häufiger Fehler: Sonderzeichen im Passwort von der Deploy-
-    Umgebung zerschossen => falsche Länge)."""
-    email = os.getenv("KT_USER") or os.getenv("KICKTIPP_EMAIL") or ""
-    password = os.getenv("KT_PASS") or os.getenv("KICKTIPP_PASSWORD") or ""
-    masked = "(leer)"
-    if email:
-        masked = email[:3] + "***" + (email[-6:] if len(email) > 9 else "")
-    return {
-        "user_masked": masked,
-        "user_length": len(email),
-        "pass_length": len(password),
-        "pass_has_whitespace": password != password.strip(),
-        "community": os.getenv("KT_COMMUNITY")
-                     or os.getenv("KICKTIPP_TIPPRUNDE")
-                     or "kicktipp-muenster",
-    }
-
-
 @app.post("/submit-tips")
 async def submit_tips(
     payload: TipPayload,
