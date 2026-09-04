@@ -213,18 +213,43 @@ async def submit_tips(
 
             await page.fill('input[name="kennung"]', email)
             await page.fill('input[name="passwort"]', password)
-            login_btn = page.locator(
+
+            # Submit-Button NUR innerhalb des Login-Formulars suchen —
+            # der frühere seitenweite Selektor konnte den Cookie-Banner-
+            # Button treffen, dann wurden die Zugangsdaten nie abgeschickt.
+            login_form = page.locator('form:has(input[name="passwort"])')
+            login_btn = login_form.locator(
                 'button[type="submit"], input[type="submit"], input[name="submitbutton"]'
             ).first
-            await login_btn.evaluate("node => node.click()")
+            if await login_btn.count() > 0:
+                await login_btn.evaluate("node => node.click()")
+            else:
+                # Fallback: Formular per Enter absenden
+                await page.press('input[name="passwort"]', "Enter")
             await page.wait_for_load_state("networkidle")
 
-            # Login VERIFIZIEREN — sonst irreführende Folgefehler
-            if "/profil/login" in page.url:
+            # Login VERIFIZIEREN — aber richtig: nicht über die URL
+            # (die matcht auch ".../loginaction" nach ERFOLGREICHEM Login),
+            # sondern über die Frage, ob das Login-Formular noch da ist.
+            still_login_form = await page.locator('input[name="kennung"]').count() > 0
+            if still_login_form:
+                # Kicktipps eigene Fehlermeldung mitnehmen (z. B. falsches Passwort)
+                kt_error = ""
+                err_loc = page.locator(".errorbox, .error, .alert, .warning, .validationmessage")
+                if await err_loc.count() > 0:
+                    try:
+                        kt_error = (await err_loc.first.inner_text()).strip()
+                    except Exception:
+                        pass
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Login fehlgeschlagen — Seite steht noch auf {page.url}. "
-                           f"Zugangsdaten/Cookie-Banner prüfen.",
+                    detail=(
+                        f"Login fehlgeschlagen — Login-Formular weiterhin sichtbar "
+                        f"(URL: {page.url}). "
+                        + (f"Kicktipp meldet: '{kt_error}'. " if kt_error else "")
+                        + "Zugangsdaten (KT_USER/KT_PASS auf dem Server) und "
+                          "Cookie-Banner prüfen."
+                    ),
                 )
 
             # ---------- 2. Tippabgabe öffnen und Zeilen scannen ----------
