@@ -28,6 +28,13 @@ def norm(s: str) -> str:
     s = re.sub(r"[^a-z0-9]", "", s)
     return s
 
+def get_core_name(name: str) -> str:
+    n = norm(name)
+    for p in ["1fc", "fc", "sv", "vfl", "sc", "vfb", "tsv", "spvgg", "fsv", "tus", "eintracht", "borussia", "bor", "bayer", "rb"]:
+        if n.startswith(p):
+            n = n[len(p):]
+    return n
+
 @app.get("/")
 async def health():
     return {"status": "ok"}
@@ -74,7 +81,7 @@ async def submit_tips(payload: TipPayload):
             # 2. Tippabgabe aufrufen
             await page.goto(f"https://www.kicktipp.de/{tipprunde}/tippabgabe", wait_until="networkidle")
 
-            # 3. Zeilen auf der Kicktipp-Seite auslesen und intelligent per Teamname matchen
+            # 3. Zeilen auf der Kicktipp-Seite auslesen
             tr_elements = await page.locator("tr").all()
             
             rows_data = []
@@ -115,13 +122,11 @@ async def submit_tips(payload: TipPayload):
                 for idx, tip in enumerate(payload.tips):
                     if idx in used_payload_indices:
                         continue
-                    h_norm = norm(tip.home)
-                    a_norm = norm(tip.away)
                     
-                    # Substring-Prüfung in beide Richtungen auf den normalisierten Strings
-                    if (h_norm in row_norm or row_norm in h_norm) and (a_norm in row_norm or row_norm in a_norm):
-                        matching_indices.append(idx)
-                    elif h_norm in row_norm and a_norm in row_norm:
+                    h_core = get_core_name(tip.home)
+                    a_core = get_core_name(tip.away)
+                    
+                    if h_core in row_norm and a_core in row_norm:
                         matching_indices.append(idx)
 
                 if len(matching_indices) == 1:
@@ -133,7 +138,6 @@ async def submit_tips(payload: TipPayload):
                         locked_count += 1
                         continue
 
-                    # Tipps eintragen
                     await r["inputs"][0].fill(str(tip.tipHome))
                     await r["inputs"][1].fill(str(tip.tipAway))
                     matched_count += 1
@@ -141,7 +145,7 @@ async def submit_tips(payload: TipPayload):
                 elif len(matching_indices) > 1:
                     raise HTTPException(
                         status_code=500,
-                        detail=f"Mehrdeutiger Namensabgleich für Zeile '{r['text'].strip()}'. Mehrere Payload-Spiele passen."
+                        detail=f"Mehrdeutiger Namensabgleich für Zeile '{r['text'].strip()}'."
                     )
                 else:
                     if r["is_locked"]:
@@ -167,7 +171,7 @@ async def submit_tips(payload: TipPayload):
                 await page.wait_for_timeout(4000)
                 await page.wait_for_load_state("networkidle")
 
-            # 5. Erfolg verifizieren (Seite neu laden und auf Warnbanner prüfen)
+            # 5. Erfolg verifizieren
             await page.goto(f"https://www.kicktipp.de/{tipprunde}/tippabgabe", wait_until="networkidle")
             
             error_banner = page.locator(".alert-danger, .error, :text('Nicht alle gesendeten Tipps'), :text('Fehler')")
@@ -175,7 +179,7 @@ async def submit_tips(payload: TipPayload):
                 banner_text = await error_banner.first.inner_text()
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Kicktipp hat die Tipps abgelehnt oder Warnung ausgegeben: {banner_text}"
+                    detail=f"Kicktipp hat die Tipps abgelehnt: {banner_text}"
                 )
 
             return {
