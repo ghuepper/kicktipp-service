@@ -26,6 +26,7 @@ Umgebungsvariablen:
 import os
 import re
 import unicodedata
+from urllib.parse import urljoin
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
@@ -241,31 +242,62 @@ async def submit_tips(
                 except Exception:
                     continue
 
-            await page.fill('input[name="kennung"]', email)
-            await page.fill('input[name="passwort"]', password)
+            # ---------- Login per direktem Formular-POST ----------
+            # Statt fragiler UI-Interaktion (Cookie-Banner, Overlays,
+            # Navigations-Races) wird das Login-Formular ausgelesen
+            # (Action-URL + ALLE Felder, auch versteckte wie CSRF-Token)
+            # und direkt als POST über den Browser-Kontext gesendet —
+            # die Session-Cookies landen dabei in derselben Session,
+            # die anschließend die Tippabgabe öffnet.
+            form_loc = page.locator('form:has(input[name="passwort"])').first
+            if await form_loc.count() == 0:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Login-Formular nicht gefunden (URL: {page.url}).",
+                )
 
-            # Submit-Button NUR innerhalb des Login-Formulars suchen —
-            # der seitenweite Selektor konnte den Cookie-Banner-Button
-            # treffen, dann wurden die Zugangsdaten nie abgeschickt.
-            login_form = page.locator('form:has(input[name="passwort"])')
-            login_btn = login_form.locator(
-                'button[type="submit"], input[type="submit"], input[name="submitbutton"]'
-            ).first
-            try:
-                if await login_btn.count() > 0:
-                    await login_btn.evaluate("node => node.click()")
-                else:
-                    # Fallback: Formular per Enter absenden
-                    await page.press('input[name="passwort"]', "Enter")
-            except Exception:
-                # Eine einsetzende Navigation zerstört den Ausführungs-
-                # kontext ("Execution context was destroyed") — das ist
-                # kein Fehler, sondern der erfolgreiche Absprung.
-                pass
-            try:
-                await page.wait_for_load_state("networkidle", timeout=15000)
-            except Exception:
-                pass  # notfalls richtet es das folgende goto
+            action = await form_loc.get_attribute("action")
+            action_url = urljoin(page.url, action) if action else page.url
+
+            fields: dict[str, str] = {}
+            for inp in await form_loc.locator("input").all():
+                name = await inp.get_attribute("name")
+                if not name:
+                    continue
+                fields[name] = (await inp.get_attribute("value")) or ""
+            fields["kennung"] = email
+            fields["passwort"] = password
+
+            # Auch benannte <button>-Elemente mitsenden — manche Server
+            # werten das Submit-Feld (z. B. name="submitbutton") aus und
+            # verwerfen den POST sonst stillschweigend.
+            for btn in await form_loc.locator("button[name]").all():
+                bname = await btn.get_attribute("name")
+                if bname and bname not in fields:
+                    fields[bname] = (await btn.get_attribute("value")) or ""
+
+            login_resp = await context.request.post(action_url, form=fields)
+            if login_resp.status >= 400:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Login-POST an {action_url} scheiterte mit HTTP {login_resp.status}.",
+                )
+
+            # Den Seitentext DIREKT nach dem Login-Versuch sichern — hier
+            # steht Kicktipps Ablehnungsgrund (z. B. "Anmeldung fehlge-
+            # schlagen"), BEVOR wir zur Tippabgabe weiternavigieren und
+            # die Information verlieren. Mit Retry, falls die Navigation
+            # den Kontext kurz zerstört.
+            post_login_text = ""
+            for _ in range(3):
+                try:
+                    await page.wait_for_timeout(700)
+                    post_login_text = re.sub(
+                        r"\s+", " ", await page.inner_text("body")
+                    )[:400]
+                    break
+                except Exception:
+                    continue
 
             # ---------- 2. Tippabgabe öffnen (navigationssicher) ----------
             # goto wartet die Navigation vollständig ab. Sind wir NICHT
@@ -295,11 +327,12 @@ async def submit_tips(
                     status_code=500,
                     detail=(
                         f"Login fehlgeschlagen — Kicktipp verlangt weiterhin die "
-                        f"Anmeldung (URL: {page.url}). "
+                        f"Anmeldung (URL: {page.url}, Login-POST-Status: {login_resp.status}). "
                         + (f"Kicktipp meldet: '{kt_error}'. " if kt_error else "")
                         + "Zugangsdaten (KT_USER/KT_PASS auf dem Server) prüfen — "
                           "siehe auch GET /debug-env. "
-                        + f"Sichtbarer Seitentext: '{page_text}'"
+                        + f"Seite DIREKT nach dem Login: '{post_login_text}' — "
+                        + f"Tippabgabe-Seite jetzt: '{page_text}'"
                     ),
                 )
             rows = await scan_rows(page)
