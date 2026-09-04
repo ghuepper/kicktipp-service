@@ -157,6 +157,28 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/debug-env")
+async def debug_env():
+    """Maskierte Kontrolle der Zugangsdaten-Umgebungsvariablen —
+    verrät keine Geheimnisse, zeigt aber, ob die Werte ankommen
+    (häufiger Fehler: Sonderzeichen im Passwort von der Deploy-
+    Umgebung zerschossen => falsche Länge)."""
+    email = os.getenv("KT_USER") or os.getenv("KICKTIPP_EMAIL") or ""
+    password = os.getenv("KT_PASS") or os.getenv("KICKTIPP_PASSWORD") or ""
+    masked = "(leer)"
+    if email:
+        masked = email[:3] + "***" + (email[-6:] if len(email) > 9 else "")
+    return {
+        "user_masked": masked,
+        "user_length": len(email),
+        "pass_length": len(password),
+        "pass_has_whitespace": password != password.strip(),
+        "community": os.getenv("KT_COMMUNITY")
+                     or os.getenv("KICKTIPP_TIPPRUNDE")
+                     or "kicktipp-muenster",
+    }
+
+
 @app.post("/submit-tips")
 async def submit_tips(
     payload: TipPayload,
@@ -201,15 +223,23 @@ async def submit_tips(
                 wait_until="networkidle",
             )
 
-            try:
-                cookie_button = page.locator(
-                    "button:has-text('Akzeptieren'), "
-                    "button:has-text('Zustimmen'), #cmpwelcomebtnyes"
-                ).first
-                await cookie_button.wait_for(state="visible", timeout=3000)
-                await cookie_button.click()
-            except Exception:
-                pass  # kein Banner — in Ordnung
+            # Cookie-/Consent-Banner schließen — auch wenn er in einem
+            # iFrame steckt (Consent-Manager rendern oft in Frames; der
+            # bisherige Klick auf der Hauptseite lief dann ins Leere).
+            consent_sel = (
+                "button:has-text('Akzeptieren'), "
+                "button:has-text('Alle akzeptieren'), "
+                "button:has-text('Zustimmen'), #cmpwelcomebtnyes"
+            )
+            for frame in page.frames:
+                try:
+                    btn = frame.locator(consent_sel).first
+                    await btn.wait_for(state="visible", timeout=2000)
+                    await btn.click()
+                    await page.wait_for_timeout(500)
+                    break
+                except Exception:
+                    continue
 
             await page.fill('input[name="kennung"]', email)
             await page.fill('input[name="passwort"]', password)
@@ -253,13 +283,23 @@ async def submit_tips(
                         kt_error = (await err_loc.first.inner_text()).strip()
                     except Exception:
                         pass
+                # Zusätzlich den sichtbaren Seitentext anreißen — darin steht
+                # Kicktipps Ablehnungsgrund auch dann, wenn kein bekannter
+                # CSS-Selektor greift.
+                page_text = ""
+                try:
+                    page_text = re.sub(r"\s+", " ", await page.inner_text("body"))[:400]
+                except Exception:
+                    pass
                 raise HTTPException(
                     status_code=500,
                     detail=(
                         f"Login fehlgeschlagen — Kicktipp verlangt weiterhin die "
                         f"Anmeldung (URL: {page.url}). "
                         + (f"Kicktipp meldet: '{kt_error}'. " if kt_error else "")
-                        + "Zugangsdaten (KT_USER/KT_PASS auf dem Server) prüfen."
+                        + "Zugangsdaten (KT_USER/KT_PASS auf dem Server) prüfen — "
+                          "siehe auch GET /debug-env. "
+                        + f"Sichtbarer Seitentext: '{page_text}'"
                     ),
                 )
             rows = await scan_rows(page)
