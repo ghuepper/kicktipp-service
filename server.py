@@ -215,24 +215,36 @@ async def submit_tips(
             await page.fill('input[name="passwort"]', password)
 
             # Submit-Button NUR innerhalb des Login-Formulars suchen —
-            # der frühere seitenweite Selektor konnte den Cookie-Banner-
-            # Button treffen, dann wurden die Zugangsdaten nie abgeschickt.
+            # der seitenweite Selektor konnte den Cookie-Banner-Button
+            # treffen, dann wurden die Zugangsdaten nie abgeschickt.
             login_form = page.locator('form:has(input[name="passwort"])')
             login_btn = login_form.locator(
                 'button[type="submit"], input[type="submit"], input[name="submitbutton"]'
             ).first
-            if await login_btn.count() > 0:
-                await login_btn.evaluate("node => node.click()")
-            else:
-                # Fallback: Formular per Enter absenden
-                await page.press('input[name="passwort"]', "Enter")
-            await page.wait_for_load_state("networkidle")
+            try:
+                if await login_btn.count() > 0:
+                    await login_btn.evaluate("node => node.click()")
+                else:
+                    # Fallback: Formular per Enter absenden
+                    await page.press('input[name="passwort"]', "Enter")
+            except Exception:
+                # Eine einsetzende Navigation zerstört den Ausführungs-
+                # kontext ("Execution context was destroyed") — das ist
+                # kein Fehler, sondern der erfolgreiche Absprung.
+                pass
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass  # notfalls richtet es das folgende goto
 
-            # Login VERIFIZIEREN — aber richtig: nicht über die URL
-            # (die matcht auch ".../loginaction" nach ERFOLGREICHEM Login),
-            # sondern über die Frage, ob das Login-Formular noch da ist.
-            still_login_form = await page.locator('input[name="kennung"]').count() > 0
-            if still_login_form:
+            # ---------- 2. Tippabgabe öffnen (navigationssicher) ----------
+            # goto wartet die Navigation vollständig ab. Sind wir NICHT
+            # eingeloggt, leitet Kicktipp hier zur Login-Seite um — der
+            # Login-Check läuft deshalb erst NACH diesem goto auf einer
+            # stabilen Seite (kein Race mit laufender Navigation mehr).
+            await page.goto(tippabgabe_url, wait_until="networkidle")
+
+            if await page.locator('input[name="kennung"]').count() > 0:
                 # Kicktipps eigene Fehlermeldung mitnehmen (z. B. falsches Passwort)
                 kt_error = ""
                 err_loc = page.locator(".errorbox, .error, .alert, .warning, .validationmessage")
@@ -244,16 +256,12 @@ async def submit_tips(
                 raise HTTPException(
                     status_code=500,
                     detail=(
-                        f"Login fehlgeschlagen — Login-Formular weiterhin sichtbar "
-                        f"(URL: {page.url}). "
+                        f"Login fehlgeschlagen — Kicktipp verlangt weiterhin die "
+                        f"Anmeldung (URL: {page.url}). "
                         + (f"Kicktipp meldet: '{kt_error}'. " if kt_error else "")
-                        + "Zugangsdaten (KT_USER/KT_PASS auf dem Server) und "
-                          "Cookie-Banner prüfen."
+                        + "Zugangsdaten (KT_USER/KT_PASS auf dem Server) prüfen."
                     ),
                 )
-
-            # ---------- 2. Tippabgabe öffnen und Zeilen scannen ----------
-            await page.goto(tippabgabe_url, wait_until="networkidle")
             rows = await scan_rows(page)
             if not rows:
                 raise HTTPException(
